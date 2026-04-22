@@ -7,9 +7,9 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 from config import DATA_RAW, START_DATE, END_DATE
 
 
-def get_all_tickers() -> list[str]:
-    return stock.get_market_ticker_list(market="KOSPI") + \
-           stock.get_market_ticker_list(market="KOSDAQ")
+def get_all_tickers(date: str = "20241229") -> list[str]:
+    return stock.get_market_ticker_list(date, market="KOSPI") + \
+           stock.get_market_ticker_list(date, market="KOSDAQ")
 
 
 def fetch_ohlcv(ticker: str, start: str = START_DATE, end: str = END_DATE) -> pd.DataFrame:

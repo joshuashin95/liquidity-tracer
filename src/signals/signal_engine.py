@@ -18,7 +18,25 @@ def compute_volume_surge(ticker: str, window: int = 20) -> pd.Series:
     df = pd.read_parquet(path)
     vol = df["거래량"]
     avg = vol.rolling(window).mean()
-    return vol / avg  # surge ratio
+    return vol / avg
+
+
+def compute_trading_value_surge(ticker: str, window: int = 20) -> pd.Series:
+    path = DATA_RAW / f"{ticker}_ohlcv.parquet"
+    if not path.exists():
+        return pd.Series(dtype=float)
+    df = pd.read_parquet(path)
+    trading_value = df["종가"] * df["거래량"]
+    avg = trading_value.rolling(window).mean()
+    return trading_value / avg
+
+
+def compute_daily_return(ticker: str) -> pd.Series:
+    path = DATA_RAW / f"{ticker}_ohlcv.parquet"
+    if not path.exists():
+        return pd.Series(dtype=float)
+    df = pd.read_parquet(path)
+    return df["종가"].pct_change()
 
 
 def compute_net_institutional(ticker: str) -> pd.Series:
@@ -39,25 +57,35 @@ def build_cluster_signals(cluster_map: pd.Series) -> pd.DataFrame:
     for cluster_id in cluster_map.unique():
         tickers = cluster_map[cluster_map == cluster_id].index.tolist()
 
-        surge_list, inst_list = [], []
+        surge_list, tv_surge_list, inst_list, return_list = [], [], [], []
         for t in tickers:
             surge = compute_volume_surge(t)
+            tv_surge = compute_trading_value_surge(t)
             inst = compute_net_institutional(t)
+            ret = compute_daily_return(t)
             if not surge.empty:
                 surge_list.append(surge)
+            if not tv_surge.empty:
+                tv_surge_list.append(tv_surge)
             if not inst.empty:
                 inst_list.append(inst)
+            if not ret.empty:
+                return_list.append(ret)
 
         if not surge_list:
             continue
 
         avg_surge = pd.concat(surge_list, axis=1).mean(axis=1)
+        avg_tv_surge = pd.concat(tv_surge_list, axis=1).mean(axis=1) if tv_surge_list else pd.Series(0, index=avg_surge.index)
         avg_inst = pd.concat(inst_list, axis=1).mean(axis=1) if inst_list else pd.Series(0, index=avg_surge.index)
+        avg_return = pd.concat(return_list, axis=1).mean(axis=1) if return_list else pd.Series(0, index=avg_surge.index)
 
         df = pd.DataFrame({
             "cluster": cluster_id,
             "volume_surge": avg_surge,
+            "trading_value_surge": avg_tv_surge,
             "net_institutional": avg_inst,
+            "cluster_return": avg_return,
         })
         records.append(df)
 

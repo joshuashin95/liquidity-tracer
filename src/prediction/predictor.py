@@ -3,6 +3,7 @@ import numpy as np
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import classification_report
+from sklearn.utils import compute_sample_weight
 from pathlib import Path
 import pickle
 import sys
@@ -10,7 +11,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 from config import DATA_PROCESSED
 
 LOOKAHEAD = 5  # predict if cluster surges within next N days
-SURGE_RETURN_THRESHOLD = 0.05  # 5% return = "surge"
+SURGE_RETURN_THRESHOLD = 0.03  # 3% return = "surge"
 
 
 def load_signals() -> pd.DataFrame:
@@ -21,7 +22,7 @@ def build_features_labels(signals: pd.DataFrame) -> tuple[pd.DataFrame, pd.Serie
     signals = signals.sort_values(["cluster", "date"]).copy()
     signals["date"] = pd.to_datetime(signals["date"])
 
-    feature_cols = ["volume_surge", "net_institutional"]
+    feature_cols = ["volume_surge", "trading_value_surge", "net_institutional"]
     frames = []
 
     for cluster_id, grp in signals.groupby("cluster"):
@@ -30,11 +31,12 @@ def build_features_labels(signals: pd.DataFrame) -> tuple[pd.DataFrame, pd.Serie
 
         # Rolling stats as additional features
         features["surge_ma5"] = grp["volume_surge"].rolling(5).mean()
+        features["tv_surge_ma5"] = grp["trading_value_surge"].rolling(5).mean()
         features["inst_ma5"] = grp["net_institutional"].rolling(5).mean()
 
-        # Label: does this cluster have combined_signal in next LOOKAHEAD days?
-        label = grp["combined_signal"].rolling(LOOKAHEAD).max().shift(-LOOKAHEAD)
-        label = label.fillna(0).astype(int)
+        # Label: does cluster return exceed threshold over next LOOKAHEAD days?
+        fwd_return = grp["cluster_return"].rolling(LOOKAHEAD).sum().shift(-LOOKAHEAD)
+        label = (fwd_return >= SURGE_RETURN_THRESHOLD).astype(int)
 
         df = features.copy()
         df["label"] = label
@@ -42,7 +44,7 @@ def build_features_labels(signals: pd.DataFrame) -> tuple[pd.DataFrame, pd.Serie
         frames.append(df)
 
     all_data = pd.concat(frames).dropna()
-    X = all_data[["volume_surge", "net_institutional", "surge_ma5", "inst_ma5"]]
+    X = all_data[["volume_surge", "trading_value_surge", "net_institutional", "surge_ma5", "tv_surge_ma5", "inst_ma5"]]
     y = all_data["label"]
     return X, y
 
@@ -60,11 +62,13 @@ def train(X: pd.DataFrame, y: pd.Series) -> GradientBoostingClassifier:
         y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
         if y_tr.nunique() < 2:
             continue
-        model.fit(X_tr, y_tr)
+        w_tr = compute_sample_weight("balanced", y_tr)
+        model.fit(X_tr, y_tr, sample_weight=w_tr)
         preds = model.predict(X_val)
         print(f"Fold {fold+1}:\n{classification_report(y_val, preds, zero_division=0)}")
 
-    model.fit(X, y)
+    w = compute_sample_weight("balanced", y)
+    model.fit(X, y, sample_weight=w)
     return model
 
 
@@ -80,12 +84,18 @@ def load_model() -> GradientBoostingClassifier:
 
 
 def predict_next(signals: pd.DataFrame, model: GradientBoostingClassifier) -> pd.DataFrame:
-    latest = signals.sort_values("date").groupby("cluster").last().reset_index()
+    sorted_signals = signals.sort_values(["cluster", "date"])
+    latest = sorted_signals.groupby("cluster").last().reset_index()
 
-    latest["surge_ma5"] = signals.sort_values("date").groupby("cluster")["volume_surge"].last()
-    latest["inst_ma5"] = signals.sort_values("date").groupby("cluster")["net_institutional"].last()
+    ma5 = (
+        sorted_signals.groupby("cluster")[["volume_surge", "trading_value_surge", "net_institutional"]]
+        .apply(lambda g: g.tail(5).mean())
+    )
+    latest["surge_ma5"] = latest["cluster"].map(ma5["volume_surge"])
+    latest["tv_surge_ma5"] = latest["cluster"].map(ma5["trading_value_surge"])
+    latest["inst_ma5"] = latest["cluster"].map(ma5["net_institutional"])
 
-    feature_cols = ["volume_surge", "net_institutional", "surge_ma5", "inst_ma5"]
+    feature_cols = ["volume_surge", "trading_value_surge", "net_institutional", "surge_ma5", "tv_surge_ma5", "inst_ma5"]
     X = latest[feature_cols].fillna(0)
     latest["surge_prob"] = model.predict_proba(X)[:, 1]
 

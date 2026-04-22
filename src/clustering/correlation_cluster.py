@@ -19,9 +19,16 @@ def load_returns() -> pd.DataFrame:
 
 
 def build_clusters(returns: pd.DataFrame, n_clusters: int = N_CLUSTERS) -> pd.Series:
-    corr = returns.tail(CORRELATION_WINDOW).corr()
-    corr = corr.fillna(0)
+    recent = returns.tail(CORRELATION_WINDOW)
+
+    # Remove daily cross-sectional mean to neutralize market factor
+    market_return = recent.mean(axis=1)
+    residuals = recent.sub(market_return, axis=0)
+
+    corr = residuals.corr().fillna(0)
     distance = 1 - corr
+    np.fill_diagonal(distance.values, 0)
+    distance = distance.clip(lower=0)
 
     model = AgglomerativeClustering(n_clusters=n_clusters, metric="precomputed", linkage="average")
     labels = model.fit_predict(distance)
